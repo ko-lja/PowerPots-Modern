@@ -27,34 +27,30 @@ public class PotEnergyStorage implements IEnergyStorage, INBTSerializable<Compou
 
     @Override
     public void deserializeNBT(CompoundTag nbt) {
-        this.energy = nbt.getInt(KEY);
+        this.energy = Math.min(nbt.getInt(KEY), this.capacity);
     }
 
     @Override
     public int receiveEnergy(int maxReceive, boolean simulate) {
         int energyReceived = Math.min(capacity - energy, Math.min(this.maxInOut, maxReceive));
 
-        if (!simulate) {
+        if (!simulate && energyReceived > 0) {
             energy += energyReceived;
-            this.tile.sync(false);
+            tile.onEnergyChanged();
         }
 
         return energyReceived;
     }
 
-    public void setEnergy(int energy) {
-        this.energy = energy;
-    }
+    public int consumeEnergy(int maxConsume, boolean simulate) {
+        int energyConsumed = Math.min(energy, maxConsume);
 
-    public int consumeEnergy(int maxExtract, boolean simulate) {
-        int energyExtracted = Math.min(energy, Math.min(this.maxInOut, maxExtract));
-
-        if (!simulate) {
-            energy -= energyExtracted;
-            this.tile.sync(false);
+        if (!simulate && energyConsumed > 0) {
+            energy -= energyConsumed;
+            tile.onEnergyChanged();
         }
 
-        return energyExtracted;
+        return energyConsumed;
     }
 
     // We don't use this method and thus we don't let other people use it either
@@ -85,7 +81,7 @@ public class PotEnergyStorage implements IEnergyStorage, INBTSerializable<Compou
 
     @Override
     public String toString() {
-        return "ChargerEnergyStorage{" +
+        return "PotEnergyStorage{" +
                 "energy=" + energy +
                 ", capacity=" + capacity +
                 ", maxInOut=" + maxInOut +

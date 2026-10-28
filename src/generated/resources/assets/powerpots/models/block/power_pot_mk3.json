@@ -1,0 +1,8 @@
+{
+  "parent": "powerpots:block/power-pot",
+  "render_type": "minecraft:cutout",
+  "textures": {
+    "base": "powerpots:block/t3",
+    "particle": "powerpots:block/t3"
+  }
+}

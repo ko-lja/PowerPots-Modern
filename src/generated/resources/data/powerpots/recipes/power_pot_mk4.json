@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "group": "powerpots:pot",
+  "key": {
+    "M": {
+      "tag": "forge:ender_pearls"
+    },
+    "P": {
+      "item": "powerpots:power_pot_mk3"
+    },
+    "S": {
+      "tag": "forge:ingots/netherite"
+    }
+  },
+  "pattern": [
+    " M ",
+    "MPM",
+    "SMS"
+  ],
+  "result": {
+    "item": "powerpots:power_pot_mk4"
+  },
+  "show_notification": true
+}

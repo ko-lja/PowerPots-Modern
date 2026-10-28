@@ -1,0 +1,12 @@
+{
+  "block.powerpots.power_pot_mk1": "PowerPot MK1",
+  "block.powerpots.power_pot_mk2": "PowerPot MK2",
+  "block.powerpots.power_pot_mk3": "PowerPot MK3",
+  "block.powerpots.power_pot_mk4": "PowerPot MK4",
+  "itemGroup.powerpots": "Power Pots",
+  "tooltip.powerpots.desc": "Grows crops using Forge Energy",
+  "tooltip.powerpots.energy": "Uses %s, stores %s",
+  "tooltip.powerpots.export": "Exports into the inventory below",
+  "tooltip.powerpots.output": "Yield: %s per harvest",
+  "tooltip.powerpots.speed": "Growth time: %s"
+}

@@ -1,622 +1,309 @@
 package dev.ftb.powerpots.pot;
 
-import net.darkhax.bookshelf.util.InventoryUtils;
 import net.darkhax.botanypots.BotanyPotHelper;
-import net.darkhax.botanypots.BotanyPots;
-import net.darkhax.botanypots.block.BlockBotanyPot;
-import net.darkhax.botanypots.block.tileentity.TileEntityBotanyPot;
-import net.darkhax.botanypots.crop.CropInfo;
-import net.darkhax.botanypots.network.BreakEffectsMessage;
-import net.darkhax.botanypots.soil.SoilInfo;
+import net.darkhax.botanypots.block.BlockEntityBotanyPot;
+import net.darkhax.botanypots.block.inv.BotanyPotContainer;
+import net.darkhax.botanypots.data.recipes.crop.Crop;
+import net.darkhax.botanypots.data.recipes.soil.Soil;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.network.Connection;
-import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.chunk.ChunkAccess;
-import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
-import net.minecraftforge.common.MinecraftForge;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityType;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.common.capabilities.Capability;
+import net.minecraftforge.common.capabilities.ForgeCapabilities;
 import net.minecraftforge.common.util.LazyOptional;
-import net.minecraftforge.energy.CapabilityEnergy;
-import net.minecraftforge.event.world.BlockEvent;
-import net.minecraftforge.items.CapabilityItemHandler;
+import net.minecraftforge.energy.IEnergyStorage;
 import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.ItemHandlerHelper;
-import net.minecraftforge.items.ItemStackHandler;
-import net.minecraftforge.items.wrapper.EmptyHandler;
-import org.jetbrains.annotations.NotNull;
+import net.minecraftforge.items.wrapper.SidedInvWrapper;
 
 import javax.annotation.Nullable;
+import java.util.Random;
 
 /**
- * Literally all of this code excluding the power modifications are from the original BotanyPot Tile code,
- * all this has done is allowed me to inject my own logic in to the default flow to support power modifications.
- * <p>
- * Complete credit to Darkhax for 80% of this classes code.
+ * A hopper botany pot that only grows while it is powered.
+ * Soil, crop and output storage live in the Botany Pots container.
  */
-public class PowerPotTileBase extends TileEntityBotanyPot {
-    static class InternalInventoryHandler extends ItemStackHandler {
-        PowerPotTileBase tile;
-
-        public InternalInventoryHandler(PowerPotTileBase tile) {
-            super(6);
-            this.tile = tile;
-        }
-
-        @NotNull
-        @Override
-        public ItemStack insertItem(int slot, @NotNull ItemStack stack, boolean simulate) {
-            return stack;
-        }
-
-        @NotNull
-        public ItemStack internalInsertItem(int slot, @NotNull ItemStack stack, boolean simulate) {
-            return super.insertItem(slot, stack, simulate);
-        }
-
-        @Override
-        protected void onContentsChanged(int slot) {
-            tile.sync(false);
-        }
-    }
-
+public class PowerPotTileBase extends BlockEntityBotanyPot {
     /**
-     * A useless inventory used to allow other blocks to visually connect to the botany pot.
+     * How long the pot keeps reporting itself as powered after the last growth tick. Smooths out
+     * flickering energy input so the client isnt resynced every tick.
      */
-    private InternalInventoryHandler inventory;
-    private final LazyOptional<InternalInventoryHandler> inventoryLazy;
+    private static final int POWER_SYNC_GRACE = 20;
 
+    private final PotTier tier;
     private final PotEnergyStorage energy;
-    private final LazyOptional<PotEnergyStorage> energyLazy;
+    private LazyOptional<IEnergyStorage> energyLazy;
+    /**
+     * Pipes may only pull from the output slots, never insert or take the soil and crop.
+     */
+    private LazyOptional<IItemHandler> outputLazy;
+
+    private final Random rng = new Random();
 
     /**
-     * The current soil in the botany pot. Can be null.
+     * Whether the pot is currently growing on the server. Synced so the client can animate the growth.
      */
-    @Nullable
-    private SoilInfo soil;
+    private boolean powered;
+    private int idleTicks = POWER_SYNC_GRACE;
 
-    private ItemStack soilStack = ItemStack.EMPTY;
-
-    /**
-     * The current crop in the botany pot. Can be null.
-     */
-    @Nullable
-    private CropInfo crop;
-
-    private ItemStack cropStack = ItemStack.EMPTY;
-
-    /**
-     * The total growth ticks for the crop to mature. -1 means it's not growing.
-     */
-    private int totalGrowthTicks;
-
-    /**
-     * The total growth ticks for the crop. -1 means it's not growing.
-     */
-    private int currentGrowthTicks;
-
-    /**
-     * A cooldown for the auto harvest.
-     */
-    private int autoHarvestCooldown;
-
-    /**
-     * The current chunk pos. Not saved to nbt.
-     */
-    private ChunkPos chunkPos;
-
-    private PotTier tier;
-
-    public PowerPotTileBase(PotTier tier) {
-        super();
+    public PowerPotTileBase(BlockEntityType<?> type, BlockPos pos, BlockState state, PotTier tier) {
+        super(type, pos, state);
 
         this.tier = tier;
-
-        inventory = new InternalInventoryHandler(this);
-        inventoryLazy = LazyOptional.of(() -> this.inventory);
-
         this.energy = new PotEnergyStorage(this, tier.config.maxEnergy.get());
         this.energyLazy = LazyOptional.of(() -> this.energy);
+        this.outputLazy = LazyOptional.of(() -> new SidedInvWrapper(this, Direction.DOWN));
     }
 
-    /**
-     * Checks if the soil can be set. This is always true if the new soil is null. Otherwise it
-     * is only true if there isn't already soil.
-     *
-     * @param newSoil The soil to set. Null will delete the existing soil.
-     * @return Whether or not the soil can be set.
-     */
-    @Override
-    public boolean canSetSoil(@Nullable SoilInfo newSoil) {
-        return newSoil == null || this.getSoil() == null;
+    public PotTier getTier() {
+        return this.tier;
     }
 
-    /**
-     * Sets the soil in the pot. If the new soil is null it will set the pot to having no soil.
-     * This will also reset the growth timer. When called on the server the pot will be synced
-     * to the client.
-     *
-     * @param newSoil The new soil to set in the pot.
-     */
-    @Override
-    public void setSoil(@Nullable SoilInfo newSoil, ItemStack stack) {
-        this.soil = newSoil;
-        this.soilStack = stack;
-        this.resetGrowthTime();
-
-        if (!this.level.isClientSide) {
-
-            this.sync(false);
-            this.level.getChunkSource().getLightEngine().checkBlock(this.worldPosition);
-        }
+    public PotEnergyStorage getEnergy() {
+        return this.energy;
     }
 
     @Override
-    public void onDataPacket(Connection net, ClientboundBlockEntityDataPacket packet) {
-        super.onDataPacket(net, packet);
-        this.level.getLightEngine().checkBlock(this.worldPosition);
-    }
+    public BotanyPotContainer createInventory() {
+        // Called from the super constructor, so the tier must only be read lazily.
+        return new BotanyPotContainer(this) {
+            @Override
+            public int getRequiredGrowthTime() {
+                int requiredGrowthTicks = super.getRequiredGrowthTime();
+                if (requiredGrowthTicks <= 0 || !(this.getPotEntity() instanceof PowerPotTileBase pot)) {
+                    return requiredGrowthTicks;
+                }
 
-    /**
-     * Checks if a crop can be set in the pot. You can always set a crop to null. Otherwise
-     * there must be a soil, and there must not be an existing crop.
-     *
-     * @param newCrop The new crop to set.
-     * @return Whether or not the crop can be set.
-     */
-    @Override
-    public boolean canSetCrop(@Nullable CropInfo newCrop) {
-
-        return newCrop == null || this.getSoil() != null && this.getCrop() == null;
-    }
-
-    /**
-     * Sets the crop inside the pot. If set to null the crop will be set to nothing. This will
-     * reset the growth time. If called on the server the tile will be synced to the client.
-     *
-     * @param newCrop The new crop to set.
-     */
-    @Override
-    public void setCrop(@Nullable CropInfo newCrop, ItemStack stack) {
-
-        this.crop = newCrop;
-        this.cropStack = stack;
-        this.resetGrowthTime();
-
-        if (!this.level.isClientSide) {
-
-            this.sync(false);
-        }
-    }
-
-    @Nullable
-    @Override
-    public SoilInfo getSoil() {
-        return this.soil;
-    }
-
-    /**
-     * Gets the crop in the pot. Null means no crop.
-     *
-     * @return The crop in the pot.
-     */
-    @Nullable
-    @Override
-    public CropInfo getCrop() {
-        return this.crop;
-    }
-
-    /**
-     * Gets the total required growth ticks For the crop to become mature enough to harvest..
-     *
-     * @return The total required growth ticks. -1 means no growth.
-     */
-    @Override
-    public int getTotalGrowthTicks() {
-        return this.totalGrowthTicks;
-    }
-
-    /**
-     * Gets the current amount of ticks the crop has grown.
-     *
-     * @return The current amount of ticks the crop has grown. -1 means no growth.
-     */
-    @Override
-    public int getCurrentGrowthTicks() {
-
-        return this.currentGrowthTicks;
-    }
-
-    /**
-     * Checks if the crop in the pot can be harvested.
-     *
-     * @return Whether or not the crop can be harvested.
-     */
-    @Override
-    public boolean canHarvest() {
-
-        return this.crop != null && this.getTotalGrowthTicks() > 0 && this.getCurrentGrowthTicks() >= this.getTotalGrowthTicks();
-    }
-
-    /**
-     * Resets the current growth ticks and the total growth ticks for the crop in the pot.
-     */
-    @Override
-    public void resetGrowthTime() {
-
-        // Recalculate total growth ticks to account for any data changes
-        int requiredGrowthTicks = BotanyPotHelper.getRequiredGrowthTicks(this.getCrop(), this.getSoil());
-
-        this.totalGrowthTicks = requiredGrowthTicks - (int) (requiredGrowthTicks * this.tier.config.speedModifier.get());
-//        System.out.println(requiredGrowthTicks);
-//        System.out.println(requiredGrowthTicks - (requiredGrowthTicks * this.tier.config.speedModifier.get()));
-
-        // Reset the growth time.
-        this.currentGrowthTicks = 0;
-
-        // To help deal with desyncs caused by reload, every reset will also reset the
-        // cached
-        // soila and crop references.
-        if (this.soil != null) {
-
-            this.soil = BotanyPotHelper.getSoil(this.soil.getId());
-
-            // Check if the soil was removed. If so kill the crop, because crop needs a
-            // soil.
-            if (this.soil == null) {
-
-                this.crop = null;
+                return Math.max(1, requiredGrowthTicks - (int) (requiredGrowthTicks * pot.tier.config.speedModifier.get()));
             }
-        }
-
-        if (this.crop != null) {
-
-            this.crop = BotanyPotHelper.getCrop(this.crop.getId());
-        }
-
-        this.autoHarvestCooldown = 5;
-        this.level.updateNeighbourForOutputSignal(this.worldPosition, this.getBlockState().getBlock());
-
-        if (!this.level.isClientSide) {
-
-            this.sync(false);
-        }
+        };
     }
 
-    /**
-     * Adds growth to the crop. This is primarily used for things like bone meal. If this is
-     * called on the server it will cause a client sync.
-     *
-     * @param ticksToGrow The amount of ticks to add.
-     */
-    @Override
-    public void addGrowth(int ticksToGrow) {
-        this.currentGrowthTicks += ticksToGrow;
-        if (this.currentGrowthTicks > this.totalGrowthTicks) {
-            this.currentGrowthTicks = this.totalGrowthTicks;
-        }
-
-        if (!this.level.isClientSide) {
-            this.sync(false);
-        }
-    }
-
-    @Override
-    public float getGrowthPercent() {
-        if (this.totalGrowthTicks == -1 || this.currentGrowthTicks == -1) {
-            return 0f;
-        }
-
-        return (float) this.currentGrowthTicks / this.totalGrowthTicks;
-    }
-
-    @Override
-    public void onTileTick() {
-        if (this.level.isClientSide) {
+    public static void tick(Level level, BlockPos pos, BlockState state, PowerPotTileBase pot) {
+        if (pot.isRemoved()) {
             return;
         }
 
-        if (hasInternalItems()) {
-            final IItemHandler foundInventory = InventoryUtils.getInventory(this.level, this.worldPosition.below(), Direction.UP);
-            if (foundInventory != EmptyHandler.INSTANCE) {
-                for (int i = 0; i < this.inventory.getSlots(); i++) {
-                    ItemStack stackInSlot = this.inventory.getStackInSlot(i);
-                    ItemStack itemStack = ItemHandlerHelper.insertItemStacked(foundInventory, stackInSlot, false);
-                    this.inventory.extractItem(i, stackInSlot.getCount() - itemStack.getCount(), false);
-                }
-            }
+        BotanyPotContainer inventory = pot.getInventory();
+        inventory.update();
+
+        Soil soil = pot.getSoil();
+        Crop crop = pot.getCrop();
+        if (soil != null) {
+            soil.onTick(level, pos, pot);
         }
 
-        if (this.hasSoilAndCrop()) {
-            if (this.isDoneGrowing()) {
-                this.level.updateNeighbourForOutputSignal(this.worldPosition, this.getBlockState().getBlock());
-                this.attemptAutoHarvest();
-            }
-            // It's not done growing
-            else {
-                boolean hasSpace = false;
-                for (int i = 0; i < this.inventory.getSlots(); i++) {
-                    if (this.inventory.getStackInSlot(i).isEmpty()) {
-                        hasSpace = true;
-                        break;
-                    }
-                }
-
-                int energyAvailable = this.energy.consumeEnergy(this.tier.config.perTickEnergy.get(), true);
-                if (energyAvailable >= this.tier.config.perTickEnergy.get() && hasSpace) {
-                    this.energy.consumeEnergy(this.tier.config.perTickEnergy.get(), false);
-                    this.currentGrowthTicks++;
-                }
-            }
-        } else if (this.totalGrowthTicks != -1 || this.currentGrowthTicks != 0) {
-            // Reset tick counts
-            this.resetGrowthTime();
-        }
-    }
-
-    @Override
-    public boolean hasSoilAndCrop() {
-        return this.soil != null && this.crop != null;
-    }
-
-    @Override
-    public boolean isDoneGrowing() {
-        return this.hasSoilAndCrop() && this.totalGrowthTicks > 0 && this.currentGrowthTicks >= this.totalGrowthTicks;
-    }
-
-    private boolean hasInternalItems() {
-        boolean hasItems = false;
-        for (int i = 0; i < this.inventory.getSlots(); i++) {
-            if (!this.inventory.getStackInSlot(i).isEmpty()) {
-                hasItems = true;
-                break;
-            }
+        if (crop != null) {
+            crop.onTick(level, pos, pot);
         }
 
-        return hasItems;
-    }
+        boolean canGrow = soil != null && crop != null && pot.areGrowthConditionsMet();
 
-    private void attemptAutoHarvest() {
-        final Block block = this.getBlockState().getBlock();
-        if (block instanceof BlockBotanyPot && ((BlockBotanyPot) block).isHopper()) {
-            if (this.autoHarvestCooldown > 0) {
-                this.autoHarvestCooldown--;
-                return;
+        if (level.isClientSide) {
+            if (canGrow && pot.powered && !pot.doneGrowing && pot.growthTime < inventory.getRequiredGrowthTime()) {
+                pot.growthTime++;
             }
 
-            final IItemHandler foundInventory = InventoryUtils.getInventory(this.level, this.worldPosition.below(), Direction.UP);
-
-            if (!this.level.isClientSide) {
-                boolean didAutoHarvest = false;
-                // Support for auto dumping into chests and other direct inventories that aren't pipes
-                if (foundInventory != EmptyHandler.INSTANCE) {
-                    didAutoHarvest = extractToInventory(foundInventory);
-                }
-
-                // If the above operation failed, use internal inventory for pipes
-                if (!didAutoHarvest) {
-                    for (final ItemStack item : BotanyPotHelper.generateDrop(this.level.random, this.getCrop())) {
-                        item.setCount(this.tier.config.itemsPerOutput.get());
-                        // it's possible for item.getCount() to be >64 at this point, so this could insert multiple stacks
-
-                        for (int i = 0; i < this.inventory.getSlots() && !item.isEmpty(); i++) {
-                            ItemStack itemStack = this.inventory.internalInsertItem(i, item.copy(), false);
-                            if (itemStack.getCount() < item.getCount()) {
-                                item.setCount(itemStack.getCount());
-                                didAutoHarvest = true;
-                            }
-                        }
-                    }
-                }
-
-                if (didAutoHarvest) {
-                    this.onCropHarvest();
-                    this.resetGrowthTime();
-                }
-            }
-        }
-    }
-
-    private boolean extractToInventory(IItemHandler inventory) {
-        boolean didExtract = false;
-
-        for (final ItemStack item : BotanyPotHelper.generateDrop(this.level.random, this.getCrop())) {
-            item.setCount(this.tier.config.itemsPerOutput.get());
-            boolean extracted = extractItemsToInventory(inventory, item);
-            if (extracted && !didExtract) {
-                // mark it as done, even if we have more to drop, voiding is fine here
-                didExtract = true;
-            }
+            return;
         }
 
-        return didExtract;
-    }
+        if (!pot.isStorageEmpty()) {
+            pot.exportToBelow();
+        }
 
-    public static boolean extractItemsToInventory(IItemHandler inventory, ItemStack item) {
-        boolean didInsert = false;
-
-        // it's possible for item.getCount() to be >64 at this point, so this could insert multiple stacks
-
-        for (int slot = 0; slot < inventory.getSlots(); slot++) {
-            // Check if the simulated insert stack can be accepted into the inventory.
-            if (inventory.isItemValid(slot, item) && (inventory.insertItem(slot, item, true).getCount() != item.getCount()
-                    || inventory instanceof InternalInventoryHandler && ((InternalInventoryHandler) inventory).internalInsertItem(slot, item, true).getCount() != item.getCount())) {
-                // Insert the items. We don't care about the remainder, and it can be safely voided.
-                ItemStack excess;
-                if (inventory instanceof InternalInventoryHandler) {
-                    excess = ((InternalInventoryHandler) inventory).internalInsertItem(slot, item.copy(), false);
+        boolean grew = false;
+        if (canGrow) {
+            if (pot.doneGrowing) {
+                if (pot.harvestDelay > 0) {
+                    pot.harvestDelay--;
+                } else if (pot.harvestToStorage()) {
+                    pot.resetGrowth();
                 } else {
-                    excess = inventory.insertItem(slot, item.copy(), false);
-                }
-
-                if (excess.getCount() < item.getCount()) {
-                    // Set auto harvest to true. This will cause a reset for the next growth cycle.
-                    didInsert = true;
-                    item.setCount(excess.getCount());
-                }
-
-                if (excess.isEmpty()) {
-                    // Exit the inventory for this loop. Will then move on to the next item and start over.
-                    break;
-                }
-            }
-        }
-        return didInsert;
-    }
-
-    @Override
-    public void onCropHarvest() {
-
-        if (this.hasSoilAndCrop()) {
-
-            final ChunkAccess chunk = this.level.getChunk(this.worldPosition);
-
-            if (chunk instanceof LevelChunk) {
-
-                // TODO remove the need to cast this.
-                BotanyPots.NETWORK.sendToChunk((LevelChunk) chunk, new BreakEffectsMessage(this.worldPosition, this.crop.getDisplayState()[0].getState()));
-            }
-        }
-
-        MinecraftForge.EVENT_BUS.post(new BlockEvent.CropGrowEvent.Post(this.level, this.worldPosition, this.getState(), this.getState()));
-    }
-
-    @Override
-    public void serialize(CompoundTag dataTag) {
-
-        if (this.soil != null) {
-
-            dataTag.putString("Soil", this.soil.getId().toString());
-
-            // Crop is only saved if there is a soil
-            if (this.crop != null) {
-
-                dataTag.putString("Crop", this.crop.getId().toString());
-
-                // Tick info is only saved if there is a crop and a soil.
-                dataTag.putInt("GrowthTicks", this.currentGrowthTicks);
-            }
-        }
-
-        // This is stupid but I'm lazy
-        energyLazy.ifPresent(e -> dataTag.putInt("energy", e.serializeNBT().getInt("energy")));
-        inventoryLazy.ifPresent(e -> dataTag.put("inventory", e.serializeNBT()));
-
-        dataTag.put("CropStack", this.cropStack.serializeNBT());
-        dataTag.put("SoilStack", this.soilStack.serializeNBT());
-    }
-
-    @Override
-    public void deserialize(CompoundTag dataTag) {
-        this.soil = null;
-        this.crop = null;
-
-        energyLazy.ifPresent(e -> e.deserializeNBT(dataTag));
-        inventoryLazy.ifPresent(e -> e.deserializeNBT(dataTag));
-
-        if (dataTag.contains("CropStack")) {
-
-            this.cropStack = ItemStack.of(dataTag.getCompound("CropStack"));
-        }
-
-        if (dataTag.contains("SoilStack")) {
-
-            this.soilStack = ItemStack.of(dataTag.getCompound("SoilStack"));
-        }
-
-        if (dataTag.contains("Soil")) {
-
-            final String rawSoilId = dataTag.getString("Soil");
-            final ResourceLocation soilId = ResourceLocation.tryParse(rawSoilId);
-
-            if (soilId != null) {
-
-                final SoilInfo foundSoil = BotanyPotHelper.getSoil(soilId);
-
-                if (foundSoil != null) {
-
-                    this.soil = foundSoil;
-
-                    // Crops are only loaded if the soil exists.
-                    if (dataTag.contains("Crop")) {
-
-                        final String rawCropId = dataTag.getString("Crop");
-                        final ResourceLocation cropId = ResourceLocation.tryParse(rawCropId);
-
-                        if (cropId != null) {
-
-                            final CropInfo cropInfo = BotanyPotHelper.getCrop(cropId);
-
-                            if (cropInfo != null) {
-
-                                this.crop = cropInfo;
-
-                                // Growth ticks are only loaded if a crop and soil exist.
-                                this.currentGrowthTicks = dataTag.getInt("GrowthTicks");
-
-                                // Reset total growth ticks on tile load to account for data
-                                // changes.
-
-                                int growthTicksForSoil = this.crop.getGrowthTicksForSoil(this.soil);
-                                this.totalGrowthTicks = growthTicksForSoil - (int) (growthTicksForSoil * this.tier.config.speedModifier.get());
-                            } else {
-
-                                BotanyPots.LOGGER.error("Botany Pot at {} had a crop of type {} but that crop does not exist. The crop will be discarded.", this.worldPosition, rawCropId);
-                            }
-                        } else {
-
-                            BotanyPots.LOGGER.error("Botany Pot at {} has an invalid crop Id of {}. The crop will be discarded.", this.worldPosition, rawCropId);
-                        }
-                    }
-                } else {
-
-                    BotanyPots.LOGGER.error("Botany Pot at {} had a soil of type {} which no longer exists. Soil and crop will be discarded.", this.worldPosition, rawSoilId);
+                    // Storage is full, retry in a bit
+                    pot.harvestDelay = 5;
                 }
             } else {
+                int cost = pot.tier.config.perTickEnergy.get();
+                if (pot.hasStorageSpace() && pot.energy.consumeEnergy(cost, true) >= cost) {
+                    pot.energy.consumeEnergy(cost, false);
+                    grew = true;
 
-                BotanyPots.LOGGER.error("Botany Pot at {} has invalid soil type {}. Soil and crop will be discarded.", this.worldPosition, rawSoilId);
+                    pot.growthTime++;
+                    soil.onGrowthTick(level, pos, pot, crop);
+                    crop.onGrowthTick(level, pos, pot, soil);
+
+                    int requiredGrowthTicks = inventory.getRequiredGrowthTime();
+                    pot.comparatorLevel = Mth.floor(15f * ((float) pot.growthTime / requiredGrowthTicks));
+
+                    if (pot.growthTime >= requiredGrowthTicks) {
+                        pot.doneGrowing = true;
+                        pot.markDirty();
+                    }
+                }
+            }
+        } else if (pot.growthTime != -1 || pot.doneGrowing || pot.comparatorLevel != 0) {
+            pot.resetGrowth();
+        }
+
+        pot.idleTicks = grew ? 0 : Math.min(pot.idleTicks + 1, POWER_SYNC_GRACE);
+        boolean powered = pot.idleTicks < POWER_SYNC_GRACE;
+        if (pot.powered != powered) {
+            pot.powered = powered;
+            pot.markDirty();
+        }
+
+        if (pot.comparatorLevel != pot.prevComparatorLevel) {
+            pot.prevComparatorLevel = pot.comparatorLevel;
+            level.updateNeighbourForOutputSignal(pos, state.getBlock());
+        }
+    }
+
+    private boolean isStorageEmpty() {
+        for (int slot : BotanyPotContainer.STORAGE_SLOT) {
+            if (!this.getInventory().getItem(slot).isEmpty()) {
+                return false;
             }
         }
+
+        return true;
     }
 
-    @Override
-    public ItemStack getSoilStack() {
-        return this.soilStack;
-    }
-
-    @Override
-    public ItemStack getCropStack() {
-        return this.cropStack;
-    }
-
-    @Override
-    public ChunkPos getChunkPos() {
-        if (this.chunkPos == null) {
-            this.chunkPos = new ChunkPos(this.worldPosition);
+    private boolean hasStorageSpace() {
+        for (int slot : BotanyPotContainer.STORAGE_SLOT) {
+            if (this.getInventory().getItem(slot).isEmpty()) {
+                return true;
+            }
         }
 
-        return this.chunkPos;
+        return false;
     }
 
-    @Override
-    @OnlyIn(Dist.CLIENT)
-    public double getViewDistance() {
-        return BotanyPots.CLIENT_CONFIG.getRenderDistance();
-    }
-
-    @Override
-    public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
-        if (cap == CapabilityEnergy.ENERGY) {
-            return energyLazy.cast();
-        } else if (!this.isRemoved() && cap == CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) {
-            return inventoryLazy.cast();
+    /**
+     * Puts the drops of the crop into the output slots. Each drop is replaced by the configured amount of
+     * items for the tier, whatever does not fit is voided.
+     *
+     * @return Whether anything was stored.
+     */
+    private boolean harvestToStorage() {
+        Crop crop = this.getCrop();
+        if (crop == null) {
+            return false;
         }
+
+        BotanyPotContainer inventory = this.getInventory();
+        boolean didCollect = false;
+
+        for (ItemStack drop : BotanyPotHelper.generateDrop(this.rng, this.level, this.worldPosition, this, crop)) {
+            if (drop.isEmpty()) {
+                continue;
+            }
+
+            int remaining = this.tier.config.itemsPerOutput.get();
+            int limit = Math.min(drop.getMaxStackSize(), inventory.getMaxStackSize());
+
+            for (int slot : BotanyPotContainer.STORAGE_SLOT) {
+                if (remaining <= 0) {
+                    break;
+                }
+
+                ItemStack existing = inventory.getItem(slot);
+                if (existing.isEmpty()) {
+                    int moved = Math.min(remaining, limit);
+                    inventory.setItem(slot, drop.copyWithCount(moved));
+                    remaining -= moved;
+                    didCollect = true;
+                } else if (existing.getCount() < limit && ItemStack.isSameItemSameTags(existing, drop)) {
+                    int moved = Math.min(remaining, limit - existing.getCount());
+                    inventory.setItem(slot, existing.copyWithCount(existing.getCount() + moved));
+                    remaining -= moved;
+                    didCollect = true;
+                }
+            }
+        }
+
+        return didCollect;
+    }
+
+    private void exportToBelow() {
+        BlockEntity below = this.level.getBlockEntity(this.worldPosition.below());
+        if (below == null) {
+            return;
+        }
+
+        below.getCapability(ForgeCapabilities.ITEM_HANDLER, Direction.UP).ifPresent(target -> {
+            BotanyPotContainer inventory = this.getInventory();
+            for (int slot : BotanyPotContainer.STORAGE_SLOT) {
+                ItemStack stack = inventory.getItem(slot);
+                if (stack.isEmpty()) {
+                    continue;
+                }
+
+                ItemStack remainder = ItemHandlerHelper.insertItemStacked(target, stack.copy(), false);
+                if (remainder.getCount() != stack.getCount()) {
+                    inventory.setItem(slot, remainder);
+                }
+            }
+        });
+    }
+
+    void onEnergyChanged() {
+        if (this.level != null) {
+            this.level.blockEntityChanged(this.worldPosition);
+        }
+    }
+
+    @Override
+    public void load(CompoundTag tag) {
+        super.load(tag);
+        this.energy.deserializeNBT(tag.getCompound("Energy"));
+        this.powered = tag.getBoolean("Powered");
+    }
+
+    @Override
+    public void saveAdditional(CompoundTag tag) {
+        super.saveAdditional(tag);
+        tag.put("Energy", this.energy.serializeNBT());
+        tag.putBoolean("Powered", this.powered);
+    }
+
+    @Override
+    protected Component getDefaultName() {
+        return this.getBlockState().getBlock().getName();
+    }
+
+    @Override
+    public <T> LazyOptional<T> getCapability(Capability<T> cap, @Nullable Direction side) {
+        if (!this.isRemoved()) {
+            if (cap == ForgeCapabilities.ENERGY) {
+                return this.energyLazy.cast();
+            }
+
+            if (cap == ForgeCapabilities.ITEM_HANDLER) {
+                return this.outputLazy.cast();
+            }
+        }
+
         return super.getCapability(cap, side);
+    }
+
+    @Override
+    public void invalidateCaps() {
+        super.invalidateCaps();
+        this.energyLazy.invalidate();
+        this.outputLazy.invalidate();
+    }
+
+    @Override
+    public void reviveCaps() {
+        super.reviveCaps();
+        this.energyLazy = LazyOptional.of(() -> this.energy);
+        this.outputLazy = LazyOptional.of(() -> new SidedInvWrapper(this, Direction.DOWN));
     }
 }

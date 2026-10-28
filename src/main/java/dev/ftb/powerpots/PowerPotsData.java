@@ -1,63 +1,60 @@
 package dev.ftb.powerpots;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.mojang.datafixers.util.Pair;
-import net.darkhax.botanypots.BotanyPots;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.data.DataGenerator;
-import net.minecraft.data.loot.BlockLoot;
+import net.minecraft.data.PackOutput;
+import net.minecraft.data.loot.BlockLootSubProvider;
+import net.minecraft.data.loot.LootTableProvider;
 import net.minecraft.data.recipes.FinishedRecipe;
+import net.minecraft.data.recipes.RecipeCategory;
 import net.minecraft.data.recipes.RecipeProvider;
 import net.minecraft.data.recipes.ShapedRecipeBuilder;
-import net.minecraft.data.tags.BlockTagsProvider;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.ItemTags;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.Item;
-import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.storage.loot.BuiltInLootTables;
-import net.minecraft.world.level.storage.loot.LootTable;
-import net.minecraft.world.level.storage.loot.parameters.LootContextParamSet;
 import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
 import net.minecraftforge.client.model.generators.*;
 import net.minecraftforge.common.Tags;
+import net.minecraftforge.common.data.BlockTagsProvider;
 import net.minecraftforge.common.data.ExistingFileHelper;
-import net.minecraftforge.common.data.ForgeLootTableProvider;
 import net.minecraftforge.common.data.LanguageProvider;
+import net.minecraftforge.data.event.GatherDataEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.event.lifecycle.GatherDataEvent;
+import net.minecraftforge.registries.RegistryObject;
 
 import javax.annotation.Nullable;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.function.BiConsumer;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 @Mod.EventBusSubscriber(modid = PowerPots.MOD_ID, bus = Mod.EventBusSubscriber.Bus.MOD)
 public class PowerPotsData {
     @SubscribeEvent
     public static void dataGenEvent(GatherDataEvent event) {
         DataGenerator gen = event.getGenerator();
+        PackOutput output = gen.getPackOutput();
+        ExistingFileHelper existingFileHelper = event.getExistingFileHelper();
 
-        if (event.includeClient()) {
-            gen.addProvider(new LangGen(gen, PowerPots.MOD_ID, "en_us"));
-            gen.addProvider(new ItemModelGens(gen, PowerPots.MOD_ID, event.getExistingFileHelper()));
-            gen.addProvider(new BlockStateGen(gen, PowerPots.MOD_ID, event.getExistingFileHelper()));
-        }
+        gen.addProvider(event.includeClient(), new LangGen(output, PowerPots.MOD_ID, "en_us"));
+        gen.addProvider(event.includeClient(), new ItemModelGens(output, PowerPots.MOD_ID, existingFileHelper));
+        gen.addProvider(event.includeClient(), new BlockStateGen(output, PowerPots.MOD_ID, existingFileHelper));
 
-        if (event.includeServer()) {
-            gen.addProvider(new BlockTagGen(gen, event.getExistingFileHelper()));
-            gen.addProvider(new RecipesGen(gen));
-            gen.addProvider(new LootTableGen(gen));
-        }
+        gen.addProvider(event.includeServer(), new BlockTagGen(output, event.getLookupProvider(), existingFileHelper));
+        gen.addProvider(event.includeServer(), new RecipesGen(output));
+        gen.addProvider(event.includeServer(), new LootTableProvider(output, Set.of(), List.of(
+                new LootTableProvider.SubProviderEntry(BlockLootGen::new, LootContextParamSets.BLOCK)
+        )));
     }
 
     private static class LangGen extends LanguageProvider {
-        public LangGen(DataGenerator gen, String modid, String locale) {
-            super(gen, modid, locale);
+        public LangGen(PackOutput output, String modid, String locale) {
+            super(output, modid, locale);
         }
 
         @Override
@@ -68,31 +65,40 @@ public class PowerPotsData {
             this.addBlock(PowerPots.POWER_POT_MK2, "PowerPot MK2");
             this.addBlock(PowerPots.POWER_POT_MK3, "PowerPot MK3");
             this.addBlock(PowerPots.POWER_POT_MK4, "PowerPot MK4");
+
+            this.add("tooltip." + PowerPots.MOD_ID + ".desc", "Grows crops using Forge Energy");
+            this.add("tooltip." + PowerPots.MOD_ID + ".speed", "Growth time: %s");
+            this.add("tooltip." + PowerPots.MOD_ID + ".energy", "Uses %s, stores %s");
+            this.add("tooltip." + PowerPots.MOD_ID + ".output", "Yield: %s per harvest");
+            this.add("tooltip." + PowerPots.MOD_ID + ".export", "Exports into the inventory below");
         }
     }
 
     private static class BlockStateGen extends BlockStateProvider {
-        public BlockStateGen(DataGenerator generator, String modid, ExistingFileHelper existingFileHelper) {
-            super(generator, modid, existingFileHelper);
+        public BlockStateGen(PackOutput output, String modid, ExistingFileHelper existingFileHelper) {
+            super(output, modid, existingFileHelper);
         }
 
         @Override
         protected void registerStatesAndModels() {
-            block(PowerPots.POWER_POT_MK1, modLoc("blocks/t1"));
-            block(PowerPots.POWER_POT_MK2, modLoc("blocks/t2"));
-            block(PowerPots.POWER_POT_MK3, modLoc("blocks/t3"));
-            block(PowerPots.POWER_POT_MK4, modLoc("blocks/t4"));
+            block(PowerPots.POWER_POT_MK1, modLoc("block/t1"));
+            block(PowerPots.POWER_POT_MK2, modLoc("block/t2"));
+            block(PowerPots.POWER_POT_MK3, modLoc("block/t3"));
+            block(PowerPots.POWER_POT_MK4, modLoc("block/t4"));
         }
 
-        private void block(Supplier<Block> block, ResourceLocation texture) {
-            horizontalBlock(block.get(), models().getBuilder(block.get().getRegistryName().getPath())
-                    .parent(new ModelFile.ExistingModelFile(modLoc("block/power-pot"), this.models().existingFileHelper)).texture("base", texture).texture("particle", texture));
+        private void block(RegistryObject<Block> block, ResourceLocation texture) {
+            horizontalBlock(block.get(), models().getBuilder(block.getId().getPath())
+                    .parent(models().getExistingFile(modLoc("block/power-pot")))
+                    .texture("base", texture)
+                    .texture("particle", texture)
+                    .renderType("cutout"));
         }
     }
 
     private static class ItemModelGens extends ItemModelProvider {
-        public ItemModelGens(DataGenerator generator, String modid, ExistingFileHelper existingFileHelper) {
-            super(generator, modid, existingFileHelper);
+        public ItemModelGens(PackOutput output, String modid, ExistingFileHelper existingFileHelper) {
+            super(output, modid, existingFileHelper);
         }
 
         @Override
@@ -103,65 +109,75 @@ public class PowerPotsData {
             this.simpleItem(PowerPots.POWER_POT_MK4_ITEM);
         }
 
-        private void simpleItem(Supplier<Item> item) {
-            String path = item.get().getRegistryName().getPath();
+        private void simpleItem(RegistryObject<Item> item) {
+            String path = item.getId().getPath();
             getBuilder(path).parent(new ModelFile.UncheckedModelFile(this.modLoc("block/" + path)));
         }
     }
 
     private static class RecipesGen extends RecipeProvider {
-        public RecipesGen(DataGenerator generatorIn) {
-            super(generatorIn);
+        public RecipesGen(PackOutput output) {
+            super(output);
         }
 
         @Override
-        protected void buildShapelessRecipes(Consumer<FinishedRecipe> consumer) {
-//            ShapedRecipeBuilder.shaped(PowerPots.POWER_POT_MK1_ITEM.get())
-//                    .unlockedBy("has_item", has(BotanyPots.instance.getContent().basicBotanyPot))
-//                    .group(PowerPots.MOD_ID + ":pot")
-//                    .pattern("SSS")
-//                    .pattern("SCS")
-//                    .pattern("SSS")
-//                    .define('S', Items.COBBLESTONE)
-//                    .define('C', BotanyPots.instance.getContent().basicBotanyPot)
-//                    .save(consumer);
-        }
-    }
+        protected void buildRecipes(Consumer<FinishedRecipe> consumer) {
+            TagKey<Item> hopperPots = ItemTags.create(ResourceLocation.fromNamespaceAndPath("botanypots", "hopper_botany_pots"));
 
-    private static class LootTableGen extends ForgeLootTableProvider {
-        private final List<Pair<Supplier<Consumer<BiConsumer<ResourceLocation, LootTable.Builder>>>, LootContextParamSet>> lootTables = Lists.newArrayList(
-                com.mojang.datafixers.util.Pair.of(BlockLootGen::new, LootContextParamSets.BLOCK)
-        );
+            ShapedRecipeBuilder.shaped(RecipeCategory.MISC, PowerPots.POWER_POT_MK1_ITEM.get())
+                    .group(PowerPots.MOD_ID + ":pot")
+                    .pattern("CRC")
+                    .pattern("IPI")
+                    .pattern("III")
+                    .define('C', Tags.Items.INGOTS_COPPER)
+                    .define('R', Tags.Items.STORAGE_BLOCKS_REDSTONE)
+                    .define('I', Tags.Items.INGOTS_IRON)
+                    .define('P', hopperPots)
+                    .unlockedBy("has_hopper_pot", has(hopperPots))
+                    .save(consumer);
 
-        public LootTableGen(DataGenerator dataGeneratorIn) {
-            super(dataGeneratorIn);
+            upgrade(consumer, PowerPots.POWER_POT_MK2_ITEM, PowerPots.POWER_POT_MK1_ITEM, Tags.Items.INGOTS_GOLD, Tags.Items.DUSTS_REDSTONE);
+            upgrade(consumer, PowerPots.POWER_POT_MK3_ITEM, PowerPots.POWER_POT_MK2_ITEM, Tags.Items.GEMS_DIAMOND, Tags.Items.INGOTS_GOLD);
+            upgrade(consumer, PowerPots.POWER_POT_MK4_ITEM, PowerPots.POWER_POT_MK3_ITEM, Tags.Items.ENDER_PEARLS, Tags.Items.INGOTS_NETHERITE);
         }
 
-        @Override
-        protected List<com.mojang.datafixers.util.Pair<Supplier<Consumer<BiConsumer<ResourceLocation, LootTable.Builder>>>, LootContextParamSet>> getTables() {
-            return this.lootTables;
+        private void upgrade(Consumer<FinishedRecipe> consumer, RegistryObject<Item> result, RegistryObject<Item> previous, TagKey<Item> main, TagKey<Item> secondary) {
+            ShapedRecipeBuilder.shaped(RecipeCategory.MISC, result.get())
+                    .group(PowerPots.MOD_ID + ":pot")
+                    .pattern(" M ")
+                    .pattern("MPM")
+                    .pattern("SMS")
+                    .define('M', main)
+                    .define('S', secondary)
+                    .define('P', previous.get())
+                    .unlockedBy("has_previous_pot", has(previous.get()))
+                    .save(consumer);
         }
     }
 
     private static class BlockTagGen extends BlockTagsProvider {
-        public BlockTagGen(DataGenerator generatorIn, @Nullable ExistingFileHelper existingFileHelper) {
-            super(generatorIn, PowerPots.MOD_ID, existingFileHelper);
+        public BlockTagGen(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider, @Nullable ExistingFileHelper existingFileHelper) {
+            super(output, lookupProvider, PowerPots.MOD_ID, existingFileHelper);
         }
 
         @Override
-        protected void addTags() {
-            Tags.IOptionalNamedTag<Block> botanyPots = BlockTags.createOptional(new ResourceLocation("botanypots:botany_pots"));
+        protected void addTags(HolderLookup.Provider provider) {
+            TagKey<Block> botanyPots = BlockTags.create(ResourceLocation.fromNamespaceAndPath("botanypots", "all_botany_pots"));
             tag(botanyPots)
+                    .add(PowerPots.POWER_POT_MK1.get(), PowerPots.POWER_POT_MK2.get(), PowerPots.POWER_POT_MK3.get(), PowerPots.POWER_POT_MK4.get());
+
+            tag(BlockTags.MINEABLE_WITH_PICKAXE)
                     .add(PowerPots.POWER_POT_MK1.get(), PowerPots.POWER_POT_MK2.get(), PowerPots.POWER_POT_MK3.get(), PowerPots.POWER_POT_MK4.get());
         }
     }
 
-
-    public static class BlockLootGen extends BlockLoot {
-        private final Map<ResourceLocation, LootTable.Builder> tables = Maps.newHashMap();
+    public static class BlockLootGen extends BlockLootSubProvider {
+        public BlockLootGen() {
+            super(Set.of(), FeatureFlags.REGISTRY.allFlags());
+        }
 
         @Override
-        protected void addTables() {
+        protected void generate() {
             this.dropSelf(PowerPots.POWER_POT_MK1.get());
             this.dropSelf(PowerPots.POWER_POT_MK2.get());
             this.dropSelf(PowerPots.POWER_POT_MK3.get());
@@ -169,29 +185,8 @@ public class PowerPotsData {
         }
 
         @Override
-        public void accept(BiConsumer<ResourceLocation, LootTable.Builder> consumer) {
-            this.addTables();
-
-            for (ResourceLocation rs : new ArrayList<>(this.tables.keySet())) {
-                if (rs != BuiltInLootTables.EMPTY) {
-                    LootTable.Builder builder = this.tables.remove(rs);
-
-                    if (builder == null) {
-                        throw new IllegalStateException(String.format("Missing loottable '%s'", rs));
-                    }
-
-                    consumer.accept(rs, builder);
-                }
-            }
-
-            if (!this.tables.isEmpty()) {
-                throw new IllegalStateException("Created block loot tables for non-blocks: " + this.tables.keySet());
-            }
-        }
-
-        @Override
-        protected void add(Block blockIn, LootTable.Builder table) {
-            this.tables.put(blockIn.getLootTable(), table);
+        protected Iterable<Block> getKnownBlocks() {
+            return PowerPots.BLOCKS.getEntries().stream().map(RegistryObject::get).toList();
         }
     }
 }

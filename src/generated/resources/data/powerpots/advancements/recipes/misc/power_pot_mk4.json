@@ -1,0 +1,35 @@
+{
+  "parent": "minecraft:recipes/root",
+  "criteria": {
+    "has_previous_pot": {
+      "conditions": {
+        "items": [
+          {
+            "items": [
+              "powerpots:power_pot_mk3"
+            ]
+          }
+        ]
+      },
+      "trigger": "minecraft:inventory_changed"
+    },
+    "has_the_recipe": {
+      "conditions": {
+        "recipe": "powerpots:power_pot_mk4"
+      },
+      "trigger": "minecraft:recipe_unlocked"
+    }
+  },
+  "requirements": [
+    [
+      "has_previous_pot",
+      "has_the_recipe"
+    ]
+  ],
+  "rewards": {
+    "recipes": [
+      "powerpots:power_pot_mk4"
+    ]
+  },
+  "sends_telemetry_event": false
+}

@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "group": "powerpots:pot",
+  "key": {
+    "M": {
+      "tag": "forge:gems/diamond"
+    },
+    "P": {
+      "item": "powerpots:power_pot_mk2"
+    },
+    "S": {
+      "tag": "forge:ingots/gold"
+    }
+  },
+  "pattern": [
+    " M ",
+    "MPM",
+    "SMS"
+  ],
+  "result": {
+    "item": "powerpots:power_pot_mk3"
+  },
+  "show_notification": true
+}

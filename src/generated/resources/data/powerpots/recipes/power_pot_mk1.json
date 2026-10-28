@@ -1,0 +1,28 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "group": "powerpots:pot",
+  "key": {
+    "C": {
+      "tag": "forge:ingots/copper"
+    },
+    "I": {
+      "tag": "forge:ingots/iron"
+    },
+    "P": {
+      "tag": "botanypots:hopper_botany_pots"
+    },
+    "R": {
+      "tag": "forge:storage_blocks/redstone"
+    }
+  },
+  "pattern": [
+    "CRC",
+    "IPI",
+    "III"
+  ],
+  "result": {
+    "item": "powerpots:power_pot_mk1"
+  },
+  "show_notification": true
+}
